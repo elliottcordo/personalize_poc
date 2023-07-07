@@ -1,0 +1,357 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "recommendaton engine dataset"
+  
+ # --- 
+Parameters:
+
+  Environment:
+    Type: String
+    Default: 'qa'
+
+# ---
+Resources:
+
+# s3 - needed for exports 
+  SourceS3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: 
+        !Join
+          - '-'
+          - - !Ref AWS::AccountId
+            - !Ref AWS::Region
+            - "recommend"
+            - !Ref Environment
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  SourceS3BucketPolicy:
+    Type: 'AWS::S3::BucketPolicy'
+    Properties:
+      Bucket: !Ref SourceS3Bucket
+      PolicyDocument:
+        Id: S3 Put Object Policy
+        Version: 2012-10-17
+        Statement:
+          - Sid: Personalize Authorization
+            Action:
+              - 's3:GetObject'
+              - 's3:ListBucket'
+              - 's3:PutObject'
+            Effect: Allow
+            Principal: 
+              Service: "personalize.amazonaws.com"
+            Resource: 
+              - !Sub 'arn:aws:s3:::${SourceS3Bucket}/*'
+              - !Sub 'arn:aws:s3:::${SourceS3Bucket}'
+
+# roles
+  RecommenderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: ""
+            Effect: Allow
+            Principal:
+              Service: personalize.amazonaws.com
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: recommender_policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "personalize:*"
+                Resource:
+                - !Sub 'arn:aws:personalize:*:*:*/${Environment}-dataset-group/*'
+              - Effect: Allow
+                Action:
+                  - "s3:GetObject"
+                  - "s3:ListBucket"
+                  - "s3:PutObject"
+                Resource: 
+                  - !Sub 'arn:aws:s3:::${SourceS3Bucket}/*'
+                  - !Sub 'arn:aws:s3:::${SourceS3Bucket}'
+                  - !Sub
+                    - "arn:aws:s3:::${bucket}/*"
+                    - bucket: !ImportValue
+                        'Fn::Sub': "${Environment}-EventCollectorS3Bucket" 
+                  - !Sub
+                    - "arn:aws:s3:::${bucket}"
+                    - bucket: !ImportValue
+                        'Fn::Sub': "${Environment}-EventCollectorS3Bucket" 
+
+  GlueJobRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: ""
+            Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: recommender_policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "personalize:*"
+                Resource:
+                - !Sub 'arn:aws:personalize:*:*:*/${Environment}-dataset-group/*'
+              - Effect: Allow
+                Action:
+                  - "s3:GetObject"
+                  - "s3:ListBucket"
+                  - "s3:PutObject"
+                Resource: 
+                  - !Sub 'arn:aws:s3:::${SourceS3Bucket}/*'
+                  - !Sub 'arn:aws:s3:::${SourceS3Bucket}'
+                  - !Sub
+                    - "arn:aws:s3:::${bucket}/*"
+                    - bucket: !ImportValue
+                        'Fn::Sub': "${Environment}-EventCollectorS3Bucket" 
+                  - !Sub
+                    - "arn:aws:s3:::${bucket}"
+                    - bucket: !ImportValue
+                        'Fn::Sub': "${Environment}-EventCollectorS3Bucket" 
+        - PolicyName: glue_execution
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - glue:CreateJob
+                  - glue:GetJob
+                  - glue:UpdateJob
+                  - glue:StartJob
+                  - glue:StopJob
+                  - glue:CreateSession
+                Resource: "*"
+              - Effect: Allow
+                Action: 
+                  - iam:PassRole
+                Resource: GlueJobRole
+                Condition:
+                  StringLike:
+                    iam:PassedToService:
+                    - glue.amazonaws.com
+                        
+# personalize objects              
+
+# dataset
+  RecommenderDatasetGroup:
+    Type: AWS::Personalize::DatasetGroup
+    Properties: 
+      Name: 
+        !Join
+        - ''
+        - - !Ref Environment
+          - "-dataset-group"
+
+  # interactions
+  RecommenderInteractionsSchema:
+        Type: AWS::Personalize::Schema
+        Properties:
+          Name: 
+            !Join
+            - ''
+            - - !Ref Environment
+              - "-interaction-schema"
+          Schema: |
+            {
+              "type": "record",
+              "name": "Interactions",
+              "namespace": "com.amazonaws.personalize.schema",
+              "fields": [
+                {
+                  "name": "USER_ID",
+                  "type": "string"
+                },
+                {
+                  "name": "ITEM_ID",
+                  "type": "string"
+                },
+                {
+                  "name": "EVENT_TYPE",
+                  "type": "string"
+                },
+                {
+                  "name": "EVENT_VALUE",
+                  "type": [
+                    "float",
+                    "null"
+                  ]
+                },
+                {
+                  "name": "TIMESTAMP",
+                  "type": "long"
+                }
+              ],
+              "version": "1.0"
+            }
+
+  RecommenderDatasetInteractions:  
+    Type: AWS::Personalize::Dataset
+    Properties: 
+      DatasetGroupArn: !GetAtt RecommenderDatasetGroup.DatasetGroupArn
+      DatasetImportJob: 
+        DataSource: 
+            DataLocation: 
+              !Join
+                - '/'
+                - - "s3:/"
+                  - Fn::ImportValue: 
+                      'Fn::Sub': "${Environment}-EventCollectorS3Bucket"
+                  - "personalize-seed/interactions.csv"
+        JobName: 
+          !Join
+          - ''
+          - - !Ref Environment
+            - "-interactions-import-job"
+        RoleArn: !GetAtt RecommenderRole.Arn
+      DatasetType: Interactions
+      Name: Interactions
+      SchemaArn: !GetAtt RecommenderInteractionsSchema.SchemaArn
+
+  # users
+  RecommenderUserSchema:
+    Type: AWS::Personalize::Schema
+    Properties:
+      Name: 
+        !Join
+          - ''
+          - - !Ref Environment
+            - "-user-schema"
+      Schema: |
+        {
+          "type": "record",
+          "name": "Users",
+          "namespace": "com.amazonaws.personalize.schema",
+          "fields": [
+            {
+              "name": "USER_ID",
+              "type": "string"
+            },
+            {
+              "name": "AGE",
+              "type": [
+                "null",
+                "int"
+              ]
+            },
+            {
+              "name": "GENDER",
+              "type": [
+                "null",
+                "string"
+              ],
+              "categorical": true
+            },
+            {
+              "name": "TAGS",
+              "type": [
+                "null",
+                "string"
+              ],
+              "categorical": true
+            }
+          ],
+          "version": "1.0"
+        }
+
+  RecommenderDatasetUsers:  
+    Type: AWS::Personalize::Dataset
+    Properties: 
+      DatasetGroupArn: !GetAtt RecommenderDatasetGroup.DatasetGroupArn
+      DatasetImportJob: 
+        DataSource: 
+            DataLocation: 
+              !Join
+                - '/'
+                - - "s3:/"
+                  - Fn::ImportValue: 
+                      'Fn::Sub': "${Environment}-EventCollectorS3Bucket"
+                  - "personalize-seed/users.csv"
+        JobName: 
+          !Join
+          - ''
+          - - !Ref Environment
+            - "-users-import-job"
+        RoleArn: !GetAtt RecommenderRole.Arn
+      DatasetType: Users
+      Name: Users
+      SchemaArn: !GetAtt RecommenderUserSchema.SchemaArn
+
+  # items
+  RecommenderItemsSchema:
+    Type: AWS::Personalize::Schema
+    Properties:
+      Name: 
+        !Join
+          - ''
+          - - !Ref Environment
+            - "-item-schema"
+      Schema: |
+        {
+          "type": "record",
+          "name": "Items",
+          "namespace": "com.amazonaws.personalize.schema",
+          "fields": [
+            {
+              "name": "ITEM_ID",
+              "type": "string"
+            },
+            {
+              "name": "CREATION_TIMESTAMP",
+              "type": "long"
+            },
+            {
+              "name": "TITLE",
+              "type": "string",
+              "textual": true
+              
+            },
+            {
+              "name": "TAGS",
+              "type": [
+                "null",
+                "string"
+              ],
+              "categorical": true
+            }
+          ],
+              "version": "1.0"
+            }
+  RecommenderDatasetItems:  
+    Type: AWS::Personalize::Dataset
+    Properties: 
+      DatasetGroupArn: !GetAtt RecommenderDatasetGroup.DatasetGroupArn
+      DatasetImportJob: 
+        DataSource: 
+            DataLocation: 
+              !Join
+                - '/'
+                - - "s3:/"
+                  - Fn::ImportValue: 
+                      'Fn::Sub': "${Environment}-EventCollectorS3Bucket"
+                  - "personalize-seed/items.csv"
+        JobName: 
+          !Join
+          - ''
+          - - !Ref Environment
+            - "-items-import-job"
+        RoleArn: !GetAtt RecommenderRole.Arn
+      DatasetType: Items
+      Name: Items
+      SchemaArn: !GetAtt RecommenderItemsSchema.SchemaArn
